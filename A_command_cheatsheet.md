@@ -523,6 +523,53 @@ ghi789jkl012   none      null      local
 
 ---
 
+## 8. 程序员常用命令的协议底层速查
+
+> 完整说明见第 4 章 §4.6。
+
+### 远程登录与文件传输
+
+| 命令 | 协议 | 传输层 | 端口 | 说明 |
+|-----|------|--------|------|------|
+| `ssh user@host` | SSH | TCP | 22 | 加密远程登录 |
+| `scp file user@host:path` | SSH | TCP | 22 | 通过 SSH 复制文件 |
+| `sftp user@host` | SSH | TCP | 22 | 交互式 SSH 文件管理 |
+| `rsync -avz src user@host:dst` | SSH | TCP | 22 | 增量同步，只传变化 |
+| `ftp host` | FTP | TCP | 21+20 | 明文（不推荐）|
+
+### HTTP 与诊断
+
+| 命令 | 协议 | 传输层 | 端口 | 说明 |
+|-----|------|--------|------|------|
+| `curl URL` | HTTP/HTTPS/... | TCP | 80/443/... | 万能 URL 工具 |
+| `wget URL` | HTTP/HTTPS | TCP | 80/443 | 批量下载 |
+| `ping host` | ICMP | **无** | **无端口** | IP 层连通性测试 |
+| `traceroute host` | ICMP/UDP | 无/UDP | 无固定 | 路径追踪 |
+| `dig domain` | DNS | UDP | 53 | DNS 查询 |
+| `nslookup domain` | DNS | UDP | 53 | DNS 查询（简单版）|
+| `nc -zv host port` | — | TCP | 自定义 | 端口连通性测试 |
+
+### 开发工具
+
+| 命令 | 协议 | 传输层 | 端口 | 说明 |
+|-----|------|--------|------|------|
+| `git clone git@host:repo` | SSH | TCP | 22 | SSH 方式 Clone |
+| `git clone https://host/repo` | HTTPS | TCP | 443 | HTTPS 方式 Clone |
+| `docker pull image` | HTTPS | TCP | 443 | 从 Registry 拉镜像 |
+| `npm install` | HTTPS | TCP | 443 | npm 包下载 |
+| `pip install` | HTTPS | TCP | 443 | Python 包下载 |
+
+### 数据库
+
+| 命令 | 协议 | 传输层 | 端口 | 说明 |
+|-----|------|--------|------|------|
+| `mysql -h host -u user` | MySQL 协议 | TCP | 3306 | MySQL 客户端 |
+| `psql -h host -U user` | PostgreSQL 协议 | TCP | 5432 | PG 客户端 |
+| `redis-cli -h host` | RESP | TCP | 6379 | Redis 客户端 |
+| `mongo --host host` | MongoDB 协议 | TCP | 27017 | MongoDB 客户端 |
+
+---
+
 ## 📚 导航
 
 - [← 返回目录](README.md)

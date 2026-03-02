@@ -1,0 +1,1195 @@
+# 第 9 章 · 远程连接 —— SSH、代理服务器搭建、代理配置
+
+> **本章目标：** 掌握远程连接的三大工具——SSH（远程命令行）、VPN（虚拟专网）、代理（流量转发）。这是 IT 日常工作中用得最多的技能。
+
+---
+
+## 8.1 这章解决什么问题？
+
+- 怎么远程登录服务器？（SSH）
+- 怎么安全地连回公司/家里的内网？（VPN）
+- 代理和 VPN 有什么区别？
+- 怎么搭建自己的 VPN？
+
+---
+
+## 🚦 新手入口（先选工具再动手）
+
+### 30 秒先懂
+
+- `SSH`：远程命令行管理服务器
+- `VPN`：把你整机流量接入远端网络
+- `代理`：只转发指定应用或指定流量
+
+### 最小可用（先能用）
+
+1. 先跑通 SSH 密钥登录（这是后面所有远程操作的基础）。
+2. 有"连回内网"需求再看 VPN。
+3. 有"分流/代理"需求再看 8.4 与 8.6。
+
+### 阅读顺序（建议）
+
+- `8.2 SSH` 必读
+- 然后按需求二选一：`8.3 VPN` 或 `8.4 代理`
+- `8.6` 用来统一理解翻墙工具术语
+
+---
+
+## 8.2 SSH —— 远程命令行
+
+### 一句话概括
+
+🔑 **SSH（Secure Shell）就是"加密的远程登录"，让你在自己电脑上操作远方的服务器。**
+
+### 基本连接
+
+```bash
+# 最基本的 SSH 连接
+ssh 用户名@服务器IP
+# 例如
+ssh root@192.168.1.100
+ssh ubuntu@43.128.10.20
+
+# 指定端口（默认 22）
+ssh -p 2222 ubuntu@43.128.10.20
+```
+
+### SSH 密钥登录（推荐）
+
+密码登录不安全（可以被暴力破解），**密钥登录**才是正确姿势。
+
+**原理：** 你生成一对密钥——私钥（留在自己电脑）+ 公钥（放到服务器上）。登录时用私钥证明身份，不需要输密码。
+
+```bash
+# 第 1 步：生成密钥对（推荐 ed25519 算法）
+ssh-keygen -t ed25519 -C "your_email@example.com"
+# 一路回车（或设置一个密钥密码）
+# 生成两个文件：
+#   ~/.ssh/id_ed25519      ← 私钥（绝对不能泄露！）
+#   ~/.ssh/id_ed25519.pub  ← 公钥（可以随便给人）
+
+# 第 2 步：把公钥部署到服务器
+ssh-copy-id ubuntu@43.128.10.20
+# 或者手动复制：
+cat ~/.ssh/id_ed25519.pub | ssh ubuntu@43.128.10.20 "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys"
+
+# 第 3 步：测试密钥登录
+ssh ubuntu@43.128.10.20
+# 不需要输密码就能登录 = 成功 ✅
+```
+
+### ~/.ssh/config —— 管理多台服务器
+
+每次输 `ssh -p 2222 ubuntu@43.128.10.20` 太麻烦。配置 config 文件后，只需要 `ssh myserver`：
+
+```bash
+# 编辑 ~/.ssh/config
+vim ~/.ssh/config
+```
+
+```
+# 工作服务器
+Host work
+    HostName 43.128.10.20
+    User ubuntu
+    Port 2222
+    IdentityFile ~/.ssh/id_ed25519
+
+# 家里的 NAS
+Host nas
+    HostName 192.168.1.50
+    User admin
+    Port 22
+
+# 跳板机（通过跳板机连内网服务器）
+Host internal
+    HostName 10.0.0.100
+    User deploy
+    ProxyJump work
+```
+
+> 💡 `ProxyJump work` 的意思是：先连 `work` 这台跳板机，再由跳板机转到 `internal`（你本机不能直接访问的内网主机）。
+
+```bash
+# 现在可以直接用别名连接
+ssh work
+ssh nas
+ssh internal   # 自动通过 work 跳转到 internal
+```
+
+### SSH 安全加固
+
+```bash
+# 编辑 SSH 服务端配置（在服务器上操作）
+sudo vim /etc/ssh/sshd_config
+```
+
+```
+# ⚠️ 先确认密钥登录成功后，再做以下修改！
+
+# 禁用密码登录（只允许密钥）
+PasswordAuthentication no
+
+# 禁止 root 直接登录
+PermitRootLogin no
+
+# 改端口（避免被扫描）
+Port 22222
+
+# 限制登录用户
+AllowUsers ubuntu deploy
+```
+
+```bash
+# 修改后重启 SSH 服务
+sudo systemctl restart sshd
+
+# ⚠️ 重要：改完后不要关闭当前 SSH 连接！
+# 新开一个终端测试能不能用新配置登录
+# 确认能登录后再关闭旧连接
+```
+
+### SSH 隧道（端口转发）
+
+> 💡 这里的"端口转发"和路由器上的"端口转发"不是一回事。SSH 端口转发是通过 SSH 加密连接来传输其他端口的数据，详见第 4 章的"转发辨析"。
+
+SSH 不只能登录，还能当"加密隧道"用——把一个端口的流量，通过 SSH 加密通道转发到另一个端口。
+
+#### 三种转发模式速览
+
+| 模式 | 参数 | 端口开在哪 | 用途 |
+|-----|------|----------|------|
+| 本地转发 | `-L` | 你电脑（本地） | 让你访问远程的服务 |
+| 远程转发 | `-R` | 服务器（远程） | 让远程使用你的服务 |
+| 动态转发 | `-D` | 你电脑（本地） | 把 SSH 当代理用 |
+
+---
+
+#### 本地转发（-L）：让远程的服务"搬"到你本地
+
+**语法拆解：**
+```
+ssh -L <本地端口>:<目标地址>:<目标端口> user@server
+        │              │           │
+        │              │           └── 服务器能访问到的某个端口
+        │              └── 服务器能访问到的某个地址
+        └── 在你电脑上开的端口
+```
+
+**例子：**
+```bash
+# 服务器上有个 Web 服务在 8080 端口，但只监听 127.0.0.1（外网访问不了）
+# 你想在本地浏览器访问它
+
+ssh -L 8080:127.0.0.1:8080 ubuntu@43.128.10.20
+#      │         │    │
+#      │         │    └── 服务器上的 8080 端口
+#      │         └── 服务器上的地址（127.0.0.1 = 服务器自己）
+#      └── 在你电脑上开 8080 端口
+
+# 现在浏览器访问 http://localhost:8080 就能看到服务器上的服务了
+```
+
+**数据流向：**
+```
+你电脑                              服务器
+    │                                  │
+    │ 浏览器访问 localhost:8080         │
+    │         │                        │
+    │         ↓                        │
+    │    本地 8080 端口                 │
+    │         │                        │
+    │  ═══════╪════════════════════    │
+    │  SSH 加密隧道（你主动发起的连接）   │
+    │  ═══════╪════════════════════    │
+    │         │                        │
+    │         └─────────────────────→ 服务器 127.0.0.1:8080
+    │                                  │
+```
+
+**更实用的例子：通过跳板机访问内网数据库**
+```bash
+ssh -L 3306:10.0.0.50:3306 ubuntu@跳板机IP
+# 本地用 mysql -h 127.0.0.1 -P 3306 就能连内网数据库
+```
+
+---
+
+#### 远程转发（-R）：让你的服务"搬"到服务器上
+
+**语法拆解：**
+```
+ssh -R <远程端口>:<本地地址>:<本地端口> user@server
+        │              │           │
+        │              │           └── 你电脑上的某个端口
+        │              └── 你电脑上的地址（127.0.0.1 = 你自己）
+        └── 在服务器上开的端口
+```
+
+**例子：**
+```bash
+# 你本地跑了个 Web 服务在 3000 端口，想让别人通过服务器访问
+
+ssh -R 8080:127.0.0.1:3000 ubuntu@43.128.10.20
+#      │         │     │
+#      │         │     └── 你电脑上的 3000 端口
+#      │         └── 你电脑上的地址
+#      └── 在服务器上开 8080 端口
+
+# 别人访问 服务器IP:8080 就能看到你本地的服务了
+```
+
+**数据流向：**
+```
+你电脑                              服务器
+    │                                  │
+    │ 本地服务 127.0.0.1:3000           │ 别人访问 服务器IP:8080
+    │         ↑                        │         │
+    │         │                        │         ↓
+    │         │                   服务器 8080 端口
+    │  ═══════╪════════════════════    │         │
+    │  SSH 加密隧道（你主动发起的连接）   │         │
+    │  ═══════╪════════════════════    │         │
+    │         │                        │         │
+    │   数据通过隧道传回 ←────────────────────────┘
+    │
+```
+
+---
+
+#### 为什么叫"本地"和"远程"？
+
+**关键点：SSH 连接永远是你发起的（你 → 服务器）。**
+
+| 模式 | 端口开在哪 | 数据流向 | 为什么叫这个名字 |
+|-----|----------|---------|----------------|
+| **-L**（Local） | 你电脑 | 你 → 服务器 | 端口开在**本地** |
+| **-R**（Remote） | 服务器 | 服务器 → 你 | 端口开在**远程** |
+
+有些人也叫"正向"和"反向"：
+- **正向（-L）**：数据顺着 SSH 连接方向走（你 → 服务器）
+- **反向（-R）**：数据逆着 SSH 连接方向走（服务器 → 你）
+
+> 💡 **记忆口诀**：
+> - `-L` = Local = 端口开在**本地** = 你要**用**远程的服务
+> - `-R` = Remote = 端口开在**远程** = 远程要**用**你的服务
+
+---
+
+#### 动态转发（-D）：把 SSH 当代理用
+
+```bash
+# 在本地开一个 SOCKS5 代理，所有流量通过服务器转发
+ssh -D 1080 ubuntu@43.128.10.20
+# 然后在浏览器/系统设置里配置 SOCKS5 代理：127.0.0.1:1080
+```
+
+这相当于在本地开了一个代理服务器，所有走这个代理的流量都会通过 SSH 隧道转发出去。
+
+---
+
+#### 配置文件写法（不用每次敲命令）
+
+除了每次敲命令，也可以写在 `~/.ssh/config` 里，SSH 连接时自动生效：
+
+```
+Host myserver
+  HostName 1.2.3.4
+  User ubuntu
+  LocalForward 8080 127.0.0.1:8080
+  RemoteForward 17890 127.0.0.1:7897
+  ServerAliveInterval 60
+```
+
+**语法对比：**
+| 命令行 | 配置文件 |
+|-------|---------|
+| `ssh -L 8080:127.0.0.1:8080` | `LocalForward 8080 127.0.0.1:8080` |
+| `ssh -R 17890:127.0.0.1:7897` | `RemoteForward 17890 127.0.0.1:7897` |
+
+> ⚠️ 注意：配置文件里用**空格**分隔，命令行用**冒号**分隔。
+
+---
+
+#### 实战案例：让远程服务器使用你本地的代理
+
+**问题背景：**
+- 你有一台远程 Linux 服务器（B）
+- 服务器上跑着 VS Code，想用 GitHub Copilot 的 Claude 模型
+- 但远程服务器被地域限制，访问不了 Claude API
+- 你的 Mac（A）上有 Clash 代理，可以正常访问 Claude
+
+**需求：** 让远程服务器"借用"你 Mac 上的代理访问互联网
+
+**解决方案：SSH 远程转发**
+
+```
+远程服务器 B                         Mac 电脑 A
+    │                                   │
+    │  VS Code 想访问 Claude            │  Clash 代理 (7897)
+    │         │                         │         │
+    │         ↓                         │         │
+    │  访问 127.0.0.1:17890             │         │
+    │         │                         │         │
+    │         │    ┌────────────────────┤         │
+    │         └────┤ SSH 隧道（你发起的）├─────────┘
+    │              └────────────────────┤
+    │                                   │
+    │              数据流向：B → A       │
+```
+
+**第一步：在 Mac 上配置 SSH**
+
+编辑 `~/.ssh/config`：
+
+```
+Host myserver
+  HostName 10.28.31.54
+  User xiaolong.zhu
+  RemoteForward 17890 127.0.0.1:7897
+  ServerAliveInterval 60
+```
+
+解释：
+- `RemoteForward 17890 127.0.0.1:7897`：在服务器上开 17890 端口，收到的数据转发到 Mac 的 7897（Clash）
+- `ServerAliveInterval 60`：每 60 秒发心跳，保持连接不断
+
+**第二步：在远程服务器上配置 VS Code**
+
+编辑 `~/.vscode-server/data/Machine/settings.json`：
+
+```json
+{
+    "http.proxy": "http://127.0.0.1:17890",
+    "http.proxyStrictSSL": false
+}
+```
+
+**第三步：连接并验证**
+
+```bash
+# Mac 上连接服务器
+ssh myserver
+
+# 验证：在服务器上测试代理是否生效
+curl --proxy http://127.0.0.1:17890 https://api.anthropic.com
+# 如果返回 HTTP/1.1 200 Connection established → 成功
+```
+
+**原理总结：**
+
+```
+1. Mac 发起 SSH 连接到服务器（你 → 服务器）
+2. SSH 连接时，在服务器上开 17890 端口
+3. 服务器上的程序访问 127.0.0.1:17890
+4. SSH 把数据通过加密隧道传回 Mac
+5. Mac 转发给本地 Clash (7897)
+6. Clash 访问互联网，拿到结果
+7. 响应原路返回
+```
+
+**为什么这样设计？**
+- SSH 连接是 Mac 发起的（Mac → 服务器），这是"正常"方向
+- 但数据是服务器发给 Mac（服务器 → Mac），和 SSH 连接方向**相反**
+- 所以用 **Remote**Forward，端口开在**远程**（Remote）
+
+
+### SSH 常见问题
+
+| 问题 | 原因 | 解决 |
+|---|---|---|
+| `Permission denied (publickey)` | 密钥没配好 | 检查 `~/.ssh/authorized_keys` 权限（600）和内容 |
+| `Connection refused` | SSH 服务没启动或端口不对 | `sudo systemctl status sshd`，检查端口 |
+| `Host key verification failed` | 服务器重装过，指纹变了 | `ssh-keygen -R 服务器IP` 删除旧指纹 |
+| `Connection timed out` | 防火墙挡了或 IP 不对 | 检查防火墙规则，确认 IP 和端口 |
+| 连上就断 | 网络不稳定 | 用 `ServerAliveInterval 60` 保活 |
+
+```bash
+# 权限问题一键修复
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/id_ed25519
+chmod 644 ~/.ssh/id_ed25519.pub
+chmod 600 ~/.ssh/config
+```
+
+---
+
+## 8.3 VPN —— 虚拟专用网络
+
+### 一句话概括
+
+🔑 **VPN 就是在公网上建一条"加密隧道"，让你像在内网一样访问远程网络。**
+
+### VPN vs 代理 —— 什么时候用哪个？
+
+> 💡 **VPN 和代理的本质区别**：VPN 让你"加入"远程网络（你的 IP 真的变了），代理让中间人帮你转发请求（你的 IP 不变）。详细原理和工作图解见第 4 章 6.8 节。
+
+**选择建议：**
+
+| 你的需求 | 推荐方案 | 原因 |
+|---------|---------|------|
+| 连回公司/家里内网 | **VPN**（WireGuard） | 你需要"变成"内网的一员，访问内网资源 |
+| 只需要浏览器走代理 | **代理**（HTTP/SOCKS5） | 不需要改变整机网络，更灵活 |
+| 国内直连、国外代理 | **代理工具 + 规则**（Clash） | 代理工具的分流规则更灵活 |
+| 全局加密，连上就不管 | **VPN** | 简单，连上后所有流量自动走 VPN |
+
+### 常见误区
+
+> **误区1：Clash、V2Ray 是 VPN 吗？**
+> 技术上它们是**代理工具**，不是 VPN。虽然支持"全局模式"（TUN 模式）接管所有流量，但底层实现不同：
+> - VPN 在**网络层**创建虚拟网卡，你的 IP 真的变了
+> - 代理工具在**应用层**拦截流量，你的 IP 没变，只是流量被转发了
+>
+> 详见第 4 章 6.8 节"TUN 模式 vs VPN"。
+
+> **误区2：VPN 不能分流？**
+> WireGuard 的 `AllowedIPs` 可以指定哪些网段走 VPN。但代理工具的分流更灵活——可以按域名、按应用、按地理位置来决定。
+
+> **误区3："系统级"和"应用级"差在哪？**
+> - 开了 VPN：浏览器、终端、微信、Slack——**所有程序的所有流量**都走 VPN
+> - 开了代理：浏览器配了能走，但终端 `curl` 不走（需要单独设置 `export http_proxy=...`）
+
+
+### WireGuard（✅ 推荐）
+
+WireGuard 是目前最推荐的 VPN 方案：
+- 代码量少（安全性好审计）
+- 速度快（已进入 Linux 内核）
+- 配置简单（比 OpenVPN 简单 10 倍）
+
+#### 服务端配置（Linux 服务器）
+
+```bash
+# 第 1 步：安装
+sudo apt update && sudo apt install wireguard -y
+
+# 第 2 步：生成服务端密钥对
+wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
+chmod 600 /etc/wireguard/server_private.key
+
+# 第 3 步：生成客户端密钥对
+wg genkey | tee /etc/wireguard/client_private.key | wg pubkey > /etc/wireguard/client_public.key
+
+# 第 4 步：创建服务端配置
+sudo vim /etc/wireguard/wg0.conf
+```
+
+```ini
+# /etc/wireguard/wg0.conf（服务端）
+[Interface]
+Address = 10.0.0.1/24
+ListenPort = 51820
+PrivateKey = <服务端私钥内容>
+
+# 开启 IP 转发和 NAT（让客户端能上网）
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+
+[Peer]
+# 客户端（你的 Mac）
+PublicKey = <客户端公钥内容>
+AllowedIPs = 10.0.0.2/32
+```
+
+```bash
+# 第 5 步：开启 IP 转发
+echo "net.ipv4.ip_forward = 1" | sudo tee -a /etc/sysctl.conf
+sudo sysctl -p
+
+# 第 6 步：开放防火墙端口
+sudo ufw allow 51820/udp
+
+# 第 7 步：启动 WireGuard
+sudo systemctl enable wg-quick@wg0
+sudo systemctl start wg-quick@wg0
+
+# 检查状态
+sudo wg show
+```
+
+#### 客户端配置（Mac）
+
+```bash
+# 安装 WireGuard（Mac）
+brew install wireguard-tools
+# 或者从 App Store 下载 WireGuard 客户端
+```
+
+```ini
+# 客户端配置文件 wg0.conf
+[Interface]
+Address = 10.0.0.2/24
+PrivateKey = <客户端私钥内容>
+DNS = 8.8.8.8
+
+[Peer]
+PublicKey = <服务端公钥内容>
+Endpoint = 43.128.10.20:51820
+AllowedIPs = 0.0.0.0/0  # 所有流量都走 VPN
+# AllowedIPs = 10.0.0.0/24  # 只有访问 10.0.0.x 才走 VPN（分流）
+PersistentKeepalive = 25
+```
+
+```bash
+# 命令行启动
+sudo wg-quick up ./wg0.conf
+
+# 验证
+curl ifconfig.me   # 应该显示服务器的 IP
+
+# 关闭
+sudo wg-quick down ./wg0.conf
+```
+
+⚠️ **AllowedIPs 的区别：**
+- `0.0.0.0/0` = 全部流量走 VPN（全局模式）
+- `10.0.0.0/24, 192.168.1.0/24` = 只有访问这些网段才走 VPN（分流模式）
+
+### OpenVPN（了解即可）
+
+OpenVPN 比 WireGuard 历史更久、更成熟，但配置复杂得多。
+
+🔑 **如果你需要用 OpenVPN，推荐用一键脚本：**
+
+```bash
+# 一键安装脚本（在服务器上运行）
+wget https://git.io/vpn -O openvpn-install.sh
+chmod +x openvpn-install.sh
+sudo bash openvpn-install.sh
+# 按提示操作，会自动生成 .ovpn 客户端配置文件
+```
+
+---
+
+## 8.4 代理 —— "中间人"帮你跑腿
+
+### 什么是代理？
+
+🔑 **代理（Proxy）就是一个"中间人"：你不直接访问目标网站，而是把请求交给代理服务器，代理服务器替你去访问，再把结果转交给你。**
+
+```
+没有代理：  你的电脑 ──────────────────→ 目标网站
+有代理：    你的电脑 ──→ 代理服务器 ──→ 目标网站
+                        （中间人）
+```
+
+**为什么要多此一举？** 因为代理服务器可以：
+- 🌍 **在不同的地理位置**：你在中国，代理在美国，目标网站以为是美国用户在访问
+- 🔒 **隐藏你的真实 IP**：目标网站只看到代理的 IP
+- 🚀 **缓存加速**：代理把常用内容缓存下来，下次直接给你，不用再去目标网站取
+- 🏢 **公司管控**：公司的代理可以记录和过滤员工的上网行为
+
+> 💡 **正向代理 vs 反向代理**（容易混淆！）
+> - **正向代理**：你知道代理的存在，主动把请求交给它。代理替**你**去访问目标。（本章讲的就是这种）
+> - **反向代理**：用户不知道代理的存在，以为直接在访问目标网站。实际上请求先到了代理（如 Nginx），代理再转给后端服务器。（第 9 章会讲）
+> 
+> 简单记：正向代理藏的是**你**（客户端），反向代理藏的是**服务器**。
+
+### 代理的类型
+
+| 类型 | 说明 | 常用端口 |
+|---|---|---|
+| **HTTP 代理** | 只代理 HTTP/HTTPS 流量 | 通常 8080 |
+| **SOCKS5 代理** | 代理所有 TCP/UDP 流量（更通用） | 通常 1080 |
+| **透明代理** | 用户无感知，网关自动转发 | - |
+
+> 🤔 **HTTP 代理和 SOCKS5 代理，我该用哪个？**
+> 
+> - **HTTP 代理**：只懂 HTTP 协议，适合浏览网页。配置简单，但只能代理浏览器流量。
+> - **SOCKS5 代理**：不关心你传什么内容，TCP/UDP 都能代理。适合需要代理所有类型流量的场景（比如游戏、SSH、FTP）。
+> - **实际使用**：大多数翻墙工具（Clash、V2Ray）会同时在本地开 HTTP 代理（8080）和 SOCKS5 代理（1080），你根据应用需要选择配哪个。终端工具一般配 HTTP 代理更方便。
+
+
+### 代理配置
+
+> 🎯 **下面这些配置都是正向代理**：
+> - 你知道代理的存在（地址是你自己填的）
+> - 你主动把请求交给代理（设置了环境变量或配置项）
+> - 代理替你去访问目标网站
+>
+> 这和第 9 章的反向代理完全不同——反向代理是服务器端配置的，用户根本不知道有代理存在。
+
+#### 系统级代理（Mac）
+
+```
+系统偏好设置 → 网络 → 高级 → 代理
+  - Web 代理（HTTP）：127.0.0.1:8080
+  - SOCKS 代理：127.0.0.1:1080
+```
+
+#### 终端代理
+
+```bash
+# 临时设置（当前终端会话有效）
+export http_proxy=http://127.0.0.1:8080
+export https_proxy=http://127.0.0.1:8080
+export all_proxy=socks5://127.0.0.1:1080
+
+# 取消代理
+unset http_proxy https_proxy all_proxy
+
+# 验证代理是否生效
+curl -I https://www.google.com
+# ✅ 成功：看到 "HTTP/1.1 200 OK" 或 "HTTP/2 200"
+# ❌ 失败：看到 "curl: (7) Failed to connect" 或长时间无响应
+
+# 另一种验证方式：查看出口 IP
+curl ifconfig.me
+# 如果显示的 IP 不是你的真实 IP → 代理生效了
+
+# 写入 ~/.bashrc 或 ~/.zshrc 永久生效
+echo 'export http_proxy=http://127.0.0.1:8080' >> ~/.zshrc
+echo 'export https_proxy=http://127.0.0.1:8080' >> ~/.zshrc
+```
+
+#### Git 代理
+
+```bash
+# 设置 Git 代理
+git config --global http.proxy http://127.0.0.1:8080
+git config --global https.proxy http://127.0.0.1:8080
+
+# 只对 GitHub 设置代理
+git config --global http.https://github.com.proxy socks5://127.0.0.1:1080
+
+# 取消
+git config --global --unset http.proxy
+git config --global --unset https.proxy
+```
+
+#### SSH 通过代理连接
+
+```bash
+# ~/.ssh/config 中配置
+Host github.com
+    ProxyCommand nc -X 5 -x 127.0.0.1:1080 %h %p
+```
+
+### PAC 文件（自动代理配置）
+
+PAC 文件可以定义"哪些网站走代理，哪些直连"：
+
+```javascript
+// proxy.pac 示例
+function FindProxyForURL(url, host) {
+    if (host == "internal.company.com") {
+        return "DIRECT";  // 内网直连
+    }
+    return "PROXY 127.0.0.1:8080";  // 其他走代理
+}
+```
+
+---
+
+## 8.5 远程桌面（简介）
+
+| 方案 | 协议 | 适用场景 |
+|---|---|---|
+| **RDP**（Remote Desktop Protocol，远程桌面协议） | 微软远程桌面 | Windows → Windows（内置，最流畅） |
+| **VNC**（Virtual Network Computing，虚拟网络计算） | 通用协议 | 跨平台，但速度一般 |
+| **RustDesk** | 自建方案 | 开源免费，可自建中继服务器，推荐 |
+| **ToDesk/向日葵** | 商业方案 | 国内好用，免费版有限制 |
+
+```bash
+# Mac 连 Windows RDP
+# 下载 Microsoft Remote Desktop（App Store 免费）
+
+# Linux 安装 RDP 客户端
+sudo apt install remmina
+
+# RustDesk（推荐自建）
+# 下载：https://rustdesk.com
+```
+
+---
+
+
+## 8.6 翻墙工具全景图（小白必读）
+
+> 🤔 **为什么要单独写这一节？** 因为"翻墙"是很多小白接触网络知识的起点——你可能还不知道什么是端口、什么是TCP，但你已经在用Clash了。这一节把你日常用的翻墙工具和前面学的网络知识串起来。
+
+### 先搞清楚一个问题：翻墙工具到底是VPN还是代理？
+
+🔑 **答案：绝大多数翻墙工具（Clash、V2Ray、Shadowsocks、Trojan）都是代理工具，不是VPN。**
+
+虽然大家日常说"开VPN"，但技术上它们是**加密代理**——在普通代理的基础上加了加密和伪装，让流量看起来像正常的HTTPS访问。
+
+**为什么大家叫它们"VPN"？** 因为效果类似——都能让你访问被封锁的网站。但底层实现完全不同（详见8.3节VPN vs代理的对比）。
+
+### 翻墙生态术语表
+
+| 术语 | 是什么 | 类比 |
+|------|--------|------|
+| **节点** | 一台海外代理服务器 | 一个"出口"——你的流量从这里出去访问目标网站 |
+| **机场** | 卖节点的服务商（提供多个节点供你选择） | "出口超市"——花钱买一堆出口，选最快的用 |
+| **订阅链接** | 一个URL，里面包含机场提供的所有节点配置信息 | "商品清单"——客户端读取这个链接，自动导入所有节点 |
+| **客户端** | 你电脑/手机上运行的翻墙软件（Clash、V2Ray、Shadowrocket等） | "调度员"——决定哪些流量走代理、走哪个节点 |
+| **协议** | 客户端和节点之间的通信方式（Shadowsocks、VMess、Trojan等） | "暗号"——双方约定好怎么加密和伪装数据 |
+| **规则/分流** | 决定哪些网站走代理、哪些直连的配置 | "路线规划"——国内网站走直连（快），国外网站走代理 |
+
+### 翻墙工具的工作原理
+
+```
+你的电脑                     海外代理服务器              目标网站
+┌──────────┐               ┌──────────┐            ┌──────────┐
+│ 浏览器    │               │          │            │          │
+│  ↓       │               │  节点     │            │ Google   │
+│ Clash    │──加密隧道──→  │ (解密后   │──正常访问→  │          │
+│ (客户端)  │←─加密隧道──  │  转发)    │←─正常回复─  │          │
+└──────────┘               └──────────┘            └──────────┘
+     ↑                          ↑
+  你的电脑上                  机场提供的服务器
+  运行的软件                  （在日本/美国/香港等）
+
+防火墙看到的：你在和某个海外IP进行加密通信（看起来像正常HTTPS）
+防火墙看不到的：你实际在访问什么网站
+```
+
+**数据流向详解：**
+1. 你在浏览器输入 `google.com`
+2. Clash 拦截这个请求，查规则发现 `google.com` 需要走代理
+3. Clash 用选定的协议（如Shadowsocks）加密请求，发给海外节点
+4. 海外节点解密，代替你去访问 `google.com`
+5. `google.com` 的回复发给节点，节点加密后发回给你
+6. Clash 解密，把结果交给浏览器
+
+### 常见翻墙协议简表
+
+| 协议 | 一句话介绍 | 特点 | 现状 |
+|------|-----------|------|------|
+| **Shadowsocks (SS)** | 最早流行的翻墙协议，轻量简洁 | 速度快，但特征容易被识别 | 仍在使用，但逐渐被替代 |
+| **VMess** | V2Ray 项目的核心协议 | 功能丰富，支持多种传输方式 | 主流协议之一 |
+| **VLESS** | VMess 的简化版，去掉了不必要的加密层 | 更轻量，配合TLS使用 | 较新，逐渐流行 |
+| **Trojan** | 把代理流量伪装成正常的HTTPS流量 | 伪装性强，难以被识别 | 主流协议之一 |
+| **Hysteria / Hysteria2** | 基于UDP（QUIC协议）的新一代协议 | 速度快，尤其在丢包网络下表现好 | 新兴，越来越流行 |
+
+> 💡 **小白选择建议：** 不用纠结协议，机场会帮你配好。如果你自建节点，推荐 **VLESS + Reality** 或 **Hysteria2**（2024年的主流选择）。
+
+### 常见翻墙客户端
+
+| 平台 | 推荐客户端 | 说明 |
+|------|-----------|------|
+| **Windows** | Clash Verge / v2rayN | Clash Verge 界面友好，v2rayN 功能全面 |
+| **macOS** | ClashX Pro / Clash Verge | ClashX Pro 最流行 |
+| **iOS** | Shadowrocket / Quantumult X | 需要非中国区 Apple ID，Shadowrocket 性价比最高 |
+| **Android** | Clash for Android / v2rayNG | 都是免费的 |
+| **Linux** | Clash Premium / sing-box | 命令行为主 |
+
+### 🔑 代理工具怎么实现"全局模式"？—— TUN 模式
+
+前面说过，代理是"应用级"的，只有配置了代理的程序才走代理。但你可能注意到 Clash 有个"全局模式"，能让所有程序的流量都走代理。这是怎么做到的？
+
+**答案：TUN 模式。**
+
+```
+普通代理模式：
+  浏览器（配了代理）──→ Clash ──→ 代理服务器    ✅ 走代理
+  终端 curl（没配代理）──→ 直接访问              ❌ 不走代理
+  微信（没配代理）──→ 直接访问                   ❌ 不走代理
+
+TUN 模式：
+  Clash 创建一个虚拟网卡（TUN），接管系统所有网络流量
+  浏览器 ──→ 虚拟网卡 ──→ Clash ──→ 代理服务器   ✅ 走代理
+  终端 curl ──→ 虚拟网卡 ──→ Clash ──→ 代理服务器  ✅ 走代理
+  微信 ──→ 虚拟网卡 ──→ Clash ──→ 代理服务器      ✅ 走代理
+```
+
+🔑 **TUN 模式的本质：** 代理工具创建一个虚拟网卡，让操作系统把它当成真正的网卡，所有流量都经过这个虚拟网卡，从而被代理工具拦截和处理。这就是为什么开了 TUN 模式后，效果和 VPN 很像——因为它也是通过虚拟网卡实现的。
+
+> 💡 **VPN 和 TUN 模式代理的区别：**
+> - **VPN（如WireGuard）**：在网络层创建虚拟网卡，所有流量加密后直接发给VPN服务器，服务器解密后转发。简单粗暴，全部流量都走。
+> - **TUN 模式代理（如Clash）**：也创建虚拟网卡，但流量经过代理工具时会**按规则分流**——匹配规则的走代理，不匹配的直连。这就是"规则模式"的实现原理。
+
+### 🤔 "代理"这个词在本文档中的多种含义
+
+你在阅读本文档时会在不同地方看到"代理"这个词，它们的含义不同：
+
+| 出现位置 | 含义 | 具体指什么 |
+|---------|------|-----------|
+| 本章（8.4节） | **正向代理** | 你主动把请求交给中间人，中间人替你访问目标（翻墙工具就是这种） |
+| 第9章（Nginx/Caddy） | **反向代理** | 用户不知道代理存在，请求先到代理，代理分发给后端服务器 |
+| 本节（翻墙工具） | **加密代理** | 在正向代理基础上加了加密和伪装的翻墙工具 |
+| 第9章（Cloudflare） | **CDN代理** | Cloudflare 的流量代理模式，隐藏源站IP并提供加速 |
+
+🔑 **记住核心区别：** 正向代理藏的是**你**（客户端），反向代理藏的是**服务器**。翻墙工具是正向代理的一种特殊形式。
+
+### SSH隧道三种模式速查
+
+> 💡 8.2节讲了SSH隧道的 -L、-R、-D 三种模式，这里用场景帮你快速区分：
+
+| 模式 | 参数 | 场景 | 数据方向 |
+|------|------|------|---------|
+| **本地转发** | `-L` | 我在外面，想访问服务器内网的数据库 | 本地端口 → SSH → 远程内网 |
+| **远程转发** | `-R` | 我在内网，想让外面的人访问我本地的网站 | 远程端口 → SSH → 本地服务 |
+| **动态转发** | `-D` | 我想把SSH服务器当成一个SOCKS5代理来用 | 本地SOCKS端口 → SSH → 任意目标 |
+
+**一句话记忆：**
+- `-L`：**L**ocal（本地）能访问远程的东西
+- `-R`：**R**emote（远程）能访问本地的东西
+- `-D`：**D**ynamic（动态）代理，啥都能访问
+
+---
+
+
+### 🌳 远程连接方案决策树
+
+不知道该用哪种方案？按这个流程走：
+
+```
+你要做什么？
+│
+├─ 远程操作服务器命令行
+│   └─ 用 SSH（第 8 章 8.1 节）
+│
+├─ 远程看到图形桌面
+│   ├─ 对方也是技术人员？ → 用 VNC / RDP（8.2 节）
+│   └─ 对方是普通用户？ → 用 ToDesk / 向日葵（8.2 节）
+│
+├─ 传输文件到服务器
+│   ├─ 少量文件 → scp / sftp（8.4 节）
+│   └─ 持续同步 → rsync（8.4 节）
+│
+├─ 从外网访问内网设备
+│   ├─ 有公网 IP？ → 端口转发（第 7 章）
+│   └─ 没有公网 IP？ → 内网穿透（第 7 章）
+│
+├─ 加密所有网络流量 / 隐藏 IP
+│   └─ 用 VPN（8.3 节）
+│
+└─ 科学上网 / 翻墙
+    └─ 用代理工具（8.6 节）
+```
+
+> 💡 **多个需求可以组合**：比如"从外网 SSH 到家里电脑"= 内网穿透 + SSH。
+
+
+---
+
+## 本章小结
+
+| 工具 | 用途 | 关键点 |
+|---|---|---|
+| SSH | 远程命令行 | 用密钥登录，禁用密码，配 ~/.ssh/config |
+| SSH 隧道 | 端口转发 | -L 本地转发、-R 远程转发、-D 动态代理 |
+| WireGuard | VPN | 简单快速，推荐新手 |
+| OpenVPN | VPN | 更成熟但配置复杂，用一键脚本 |
+| 代理 | 流量转发 | 终端和浏览器代理分开配置 |
+
+**🔑 选择建议：**
+- 远程管理服务器 → SSH
+- 连回内网/全局加密 → WireGuard VPN
+- 只需要浏览器/特定应用走代理 → SOCKS5/HTTP 代理
+- 远程桌面 → RustDesk（自建）或 RDP（Windows）
+
+---
+
+## 📦 扩展区域
+
+### SSH Agent 转发
+
+当你通过跳板机连接内网服务器时，不需要把私钥放到跳板机上：
+
+```bash
+# 启动 SSH Agent 并添加密钥
+eval $(ssh-agent)
+ssh-add ~/.ssh/id_ed25519
+
+# 连接时启用 Agent 转发
+ssh -A ubuntu@跳板机
+# 在跳板机上可以直接 ssh 到内网服务器，使用你本地的密钥
+```
+
+### Mosh —— 移动网络下的 SSH 替代
+
+SSH 在网络切换（Wi-Fi → 4G）时会断开。Mosh 可以自动重连：
+
+```bash
+# 安装
+brew install mosh        # Mac
+sudo apt install mosh    # Linux（服务端也要装）
+
+# 使用（和 SSH 一样）
+mosh ubuntu@43.128.10.20
+```
+
+### WireGuard 多客户端
+
+一个 WireGuard 服务端可以连接多个客户端，每个客户端一个 `[Peer]` 段，分配不同的 IP（10.0.0.2、10.0.0.3...）。
+
+---
+
+---
+
+## 9.3 自建代理服务器（Xray + VLESS + Reality）
+
+> **适合人群：** 有 VPS、想自建代理服务而非依赖机场的用户。  
+> **VPN/代理原理** 已在第 7 章详述，本节只讲实操配置。
+
+### 9.3.1 准备工作
+
+1. **VPS**：境外服务器（香港/日本/美国），运营商建议 Bandwagon / Vultr / DigitalOcean
+2. **域名**（可选，但推荐）：做 Reality 伪装用
+3. **条件**：VPS 的 IP 没有被 GFW 封锁（可以 `ping` 测试）
+
+```bash
+# 测试 VPS 是否可以访问
+ping your-vps-ip
+```
+
+### 9.3.2 安装 Xray（服务端，在 VPS 上执行）
+
+```bash
+# 一键安装脚本（推荐）
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+# 安装后 Xray 服务自动启动
+systemctl status xray
+```
+
+### 9.3.3 VLESS + Reality 配置（服务端）
+
+Reality 是目前最难被 GFW 识别的伪装方式——借用真实网站（如微软）的 TLS 证书特征。
+
+```bash
+# 生成 UUID
+xray uuid
+
+# 生成 Reality 密钥对
+xray x25519
+# 输出：
+# Private key: <你的私钥，保留>
+# Public key: <你的公钥，给客户端用>
+```
+
+**服务端配置文件：** `/usr/local/etc/xray/config.json`
+
+```json
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [{
+    "port": 443,
+    "protocol": "vless",
+    "settings": {
+      "clients": [{
+        "id": "你的UUID",
+        "flow": "xtls-rprx-vision"
+      }],
+      "decryption": "none"
+    },
+    "streamSettings": {
+      "network": "tcp",
+      "security": "reality",
+      "realitySettings": {
+        "show": false,
+        "dest": "www.microsoft.com:443",
+        "xver": 0,
+        "serverNames": ["www.microsoft.com"],
+        "privateKey": "你的私钥",
+        "shortIds": [""]
+      }
+    }
+  }],
+  "outbounds": [{"protocol": "freedom"}]
+}
+```
+
+```bash
+# 重启 Xray 使配置生效
+systemctl restart xray
+
+# 查看日志确认正常运行
+journalctl -u xray -n 50
+```
+
+### 9.3.4 客户端配置（Clash Verge / v2rayN）
+
+**将以下信息填入 Clash Verge 的代理配置：**
+
+```yaml
+# Clash Verge 代理节点配置
+proxies:
+  - name: "我的服务器"
+    type: vless
+    server: your-vps-ip     # 你的 VPS IP
+    port: 443
+    uuid: 你的UUID
+    network: tcp
+    tls: true
+    udp: true
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: 你的公钥
+      short-id: ""
+    servername: www.microsoft.com
+    client-fingerprint: chrome
+```
+
+---
+
+## 9.4 程序员代理配置指南
+
+> **背景：** 你开了 Clash，但 `npm install`/`docker pull`/`git clone` 仍然超时？  
+> 原因：系统代理只覆盖部分应用，终端工具需要单独配置。  
+> 详细原理见第 7 章 §7.5。
+
+### 9.4.1 核心概念
+
+| 代理类型 | Clash 默认端口 | 覆盖范围 |
+|---------|-------------|---------|
+| HTTP 代理 | 7890 | HTTP/HTTPS 流量 |
+| SOCKS5 代理 | 7891 | 任意 TCP/UDP 流量（更通用）|
+
+**终端推荐用 SOCKS5（更通用）：**
+
+```bash
+# 设置终端代理（当前 shell 会话有效）
+export ALL_PROXY=socks5://127.0.0.1:7891
+export NO_PROXY="localhost,127.0.0.1,192.168.0.0/16,10.0.0.0/8,*.local,*.company.com"
+
+# 取消
+unset ALL_PROXY NO_PROXY
+
+# 验证代理生效：看出口 IP
+curl -s cip.cc
+```
+
+### 9.4.2 NO_PROXY —— 让公司内网绕过代理
+
+这是最容易被忽视的配置：
+
+```bash
+# 设置 NO_PROXY，让内网域名不走代理
+export NO_PROXY="localhost,127.0.0.1,.company.com,.corp.local,192.168.0.0/16,10.0.0.0/8"
+
+# 永久配置：加入 ~/.zshrc 或 ~/.bashrc
+echo 'export ALL_PROXY=socks5://127.0.0.1:7891' >> ~/.zshrc
+echo 'export NO_PROXY="localhost,127.0.0.1,.company.com,192.168.0.0/16"' >> ~/.zshrc
+```
+
+> ⚠️ `NO_PROXY` 是与 Clash bypass 规则相同目标的"终端侧"方案。两者需要配套设置。
+
+### 9.4.3 各工具代理配置速查
+
+**Git：**
+
+```bash
+# SSH 方式（推荐，走 SSH 端口 22）
+# 不需要代理，SSH 走公钥认证，一般不被代理影响
+
+# HTTPS 方式
+git config --global http.proxy socks5://127.0.0.1:7891
+git config --global https.proxy socks5://127.0.0.1:7891
+
+# 只对 GitHub 设置代理
+git config --global http.https://github.com.proxy socks5://127.0.0.1:7891
+
+# 取消
+git config --global --unset http.proxy
+git config --global --unset https.proxy
+```
+
+**npm / yarn / pnpm：**
+
+```bash
+# npm
+npm config set proxy http://127.0.0.1:7890
+npm config set https-proxy http://127.0.0.1:7890
+
+# 取消
+npm config delete proxy
+npm config delete https-proxy
+
+# yarn
+yarn config set proxy http://127.0.0.1:7890
+yarn config set https-proxy http://127.0.0.1:7890
+```
+
+**pip（Python）：**
+
+```bash
+# 临时
+pip install package --proxy http://127.0.0.1:7890
+
+# 永久（~/.pip/pip.conf）
+[global]
+proxy = http://127.0.0.1:7890
+```
+
+**Docker：**
+
+```bash
+# ~/.docker/config.json（Docker daemon 代理，用于 docker pull）
+mkdir -p ~/.docker
+cat > ~/.docker/config.json << 'EOF'
+{
+  "proxies": {
+    "default": {
+      "httpProxy": "http://127.0.0.1:7890",
+      "httpsProxy": "http://127.0.0.1:7890",
+      "noProxy": "localhost,127.0.0.1,.company.com"
+    }
+  }
+}
+EOF
+```
+
+> ⚠️ Docker Desktop 有图形界面代理设置（Settings → Resources → Proxies），优先用界面设置。
+
+**curl：**
+
+```bash
+# 临时
+curl -x socks5://127.0.0.1:7891 https://google.com
+
+# 永久（~/.curlrc）
+echo 'proxy=socks5://127.0.0.1:7891' >> ~/.curlrc
+```
+
+**Homebrew：**
+
+```bash
+# 通过环境变量，Homebrew 会自动读取
+export ALL_PROXY=socks5://127.0.0.1:7891
+brew install package
+```
+
+### 9.4.4 SSH 通过代理连接
+
+```bash
+# ~/.ssh/config
+Host github.com
+    ProxyCommand nc -X 5 -x 127.0.0.1:7891 %h %p
+
+Host *.example.com
+    ProxyCommand nc -X 5 -x 127.0.0.1:7891 %h %p
+```
+
+### 9.4.5 WSL2 的特殊代理配置
+
+> WSL2 是独立的虚拟机，有自己的 IP，和 Windows 宿主机不共享 `127.0.0.1`。
+
+```bash
+# WSL2 内获取宿主机 IP（就是 Windows 的地址）
+export HOST_IP=$(ip route show | grep -i default | awk '{ print $3}')
+
+# 设置代理指向宿主机（Windows 上的 Clash）
+export ALL_PROXY="socks5://${HOST_IP}:7891"
+
+# 宿主机 Clash 需要开启"允许局域网连接"！
+```
+
+> 更现代的方案：WSL2 最新版本支持 `127.0.0.1` 直接访问宿主机（镜像网络模式），在 `.wslconfig` 中配置 `networkingMode=mirrored`。
+
+---
+
+> **上一章 ←** [第 8 章 · 家庭网络](08_home_network.md)
+>
+> **下一章 →** [第 10 章 · 自建服务](10_self_hosting.md)
+
+---
+
+## 📚 导航
+
+- [← 返回目录](README.md)
+- [← 第 8 章](08_home_network.md)
+- [第 10 章 →](10_self_hosting.md)
